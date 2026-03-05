@@ -90,7 +90,7 @@ jobs:
   release-pr-version-check:
     name: Release PR Version Consistency
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && startsWith(github.event.pull_request.title, 'chore: release ')
+    if: "${{ github.event_name == 'pull_request' && startsWith(github.event.pull_request.title, 'chore: release ') }}"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
