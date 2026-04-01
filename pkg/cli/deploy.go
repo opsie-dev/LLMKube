@@ -36,6 +36,8 @@ import (
 	inferencev1alpha1 "github.com/defilantech/llmkube/api/v1alpha1"
 )
 
+const defaultGPUVendor = "nvidia"
+
 type deployOptions struct {
 	name                string
 	namespace           string
@@ -139,7 +141,7 @@ Examples:
 	cmd.Flags().Int32Var(&opts.gpuLayers, "gpu-layers", -1,
 		"Number of model layers to offload to GPU (-1 = all layers, 0 = auto)")
 	cmd.Flags().StringVar(&opts.gpuMemory, "gpu-memory", "", "GPU memory request (e.g., '8Gi', '16Gi')")
-	cmd.Flags().StringVar(&opts.gpuVendor, "gpu-vendor", "nvidia", "GPU vendor (nvidia, amd, intel)")
+	cmd.Flags().StringVar(&opts.gpuVendor, "gpu-vendor", defaultGPUVendor, "GPU vendor (nvidia, amd, intel)")
 
 	cmd.Flags().Int32Var(&opts.contextSize, "context", 0,
 		"Context window size in tokens (e.g., 8192, 16384, 32768). If not specified, uses llama.cpp default.")
@@ -226,7 +228,11 @@ func runDeploy(opts *deployOptions) error {
 	fmt.Printf("Namespace:   %s\n", opts.namespace)
 	fmt.Printf("Accelerator: %s\n", opts.accelerator)
 	if opts.gpu {
-		fmt.Printf("GPU:         %d x %s (layers: %d)\n", opts.gpuCount, opts.gpuVendor, opts.gpuLayers)
+		displayVendor := opts.gpuVendor
+		if opts.accelerator == acceleratorMetal {
+			displayVendor = "apple"
+		}
+		fmt.Printf("GPU:         %d x %s (layers: %d)\n", opts.gpuCount, displayVendor, opts.gpuLayers)
 	}
 	fmt.Printf("Replicas:    %d\n", opts.replicas)
 	if opts.contextSize > 0 {
@@ -432,7 +438,7 @@ func resolveAcceleratorAndImage(opts *deployOptions) {
 	if opts.gpu {
 		if opts.accelerator == "" {
 			if detectMetalSupport() {
-				opts.accelerator = "metal"
+				opts.accelerator = acceleratorMetal
 				fmt.Printf("ℹ️  Auto-detected accelerator: %s (Apple Silicon GPU)\n", opts.accelerator)
 			} else {
 				opts.accelerator = "cuda"
@@ -440,7 +446,7 @@ func resolveAcceleratorAndImage(opts *deployOptions) {
 			}
 		}
 
-		if opts.accelerator == "metal" {
+		if opts.accelerator == acceleratorMetal {
 			if opts.image == "" {
 				opts.image = ""
 			}

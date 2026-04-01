@@ -546,14 +546,84 @@ func TestNewDeployCommand(t *testing.T) {
 	if f := cmd.Flags().Lookup("replicas"); f.DefValue != "1" {
 		t.Errorf("replicas default = %q, want %q", f.DefValue, "1")
 	}
-	if f := cmd.Flags().Lookup("gpu-vendor"); f.DefValue != "nvidia" {
-		t.Errorf("gpu-vendor default = %q, want %q", f.DefValue, "nvidia")
+	if f := cmd.Flags().Lookup("gpu-vendor"); f.DefValue != defaultGPUVendor {
+		t.Errorf("gpu-vendor default = %q, want %q", f.DefValue, defaultGPUVendor)
 	}
 	if f := cmd.Flags().Lookup("cpu"); f.DefValue != "2" {
 		t.Errorf("cpu default = %q, want %q", f.DefValue, "2")
 	}
 	if f := cmd.Flags().Lookup("memory"); f.DefValue != "4Gi" {
 		t.Errorf("memory default = %q, want %q", f.DefValue, "4Gi")
+	}
+}
+
+func TestResolveAcceleratorAndImage(t *testing.T) {
+	tests := []struct {
+		name       string
+		opts       *deployOptions
+		wantAccel  string
+		wantVendor string
+		wantImage  string
+	}{
+		{
+			name: "metal accelerator keeps vendor as default (display-only override)",
+			opts: &deployOptions{
+				gpu:         true,
+				accelerator: "metal",
+				gpuVendor:   defaultGPUVendor, // flag default
+			},
+			wantAccel:  "metal",
+			wantVendor: defaultGPUVendor, // vendor stays nvidia in opts, display shows "apple"
+			wantImage:  "",
+		},
+		{
+			name: "cuda accelerator keeps nvidia vendor",
+			opts: &deployOptions{
+				gpu:         true,
+				accelerator: "cuda",
+				gpuVendor:   defaultGPUVendor,
+			},
+			wantAccel:  "cuda",
+			wantVendor: defaultGPUVendor,
+			wantImage:  "ghcr.io/ggml-org/llama.cpp:server-cuda",
+		},
+		{
+			name: "metal with explicit amd vendor is preserved",
+			opts: &deployOptions{
+				gpu:         true,
+				accelerator: "metal",
+				gpuVendor:   "amd",
+			},
+			wantAccel:  "metal",
+			wantVendor: "amd",
+			wantImage:  "",
+		},
+		{
+			name: "cpu defaults",
+			opts: &deployOptions{
+				gpu:       false,
+				gpuVendor: defaultGPUVendor,
+			},
+			wantAccel:  "cpu",
+			wantVendor: defaultGPUVendor,
+			wantImage:  "ghcr.io/ggml-org/llama.cpp:server",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resolveAcceleratorAndImage(tt.opts)
+
+			if tt.opts.accelerator != tt.wantAccel {
+				t.Errorf("accelerator = %q, want %q", tt.opts.accelerator, tt.wantAccel)
+			}
+			if tt.opts.gpuVendor != tt.wantVendor {
+				t.Errorf("gpuVendor = %q, want %q", tt.opts.gpuVendor, tt.wantVendor)
+			}
+			if tt.opts.image != tt.wantImage {
+				t.Errorf("image = %q, want %q", tt.opts.image, tt.wantImage)
+			}
+		})
 	}
 }
 
