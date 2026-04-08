@@ -1024,14 +1024,19 @@ func (r *InferenceServiceReconciler) constructDeployment(
 	// Set command/args based on runtime
 	if len(isvc.Spec.Command) > 0 {
 		container.Command = isvc.Spec.Command
+	} else if cb, ok := backend.(CommandBuilder); ok {
+		container.Command = cb.BuildCommand()
 	}
 	if args != nil {
 		container.Args = args
 	}
 
-	// Add user-specified env vars
+	// Add runtime-generated env vars, then user-specified env vars (user wins on conflict)
+	if eb, ok := backend.(EnvBuilder); ok {
+		container.Env = append(container.Env, eb.BuildEnv(isvc)...)
+	}
 	if len(isvc.Spec.Env) > 0 {
-		container.Env = isvc.Spec.Env
+		container.Env = append(container.Env, isvc.Spec.Env...)
 	}
 
 	gpuCount := resolveGPUCount(isvc, model)
@@ -1080,6 +1085,7 @@ func (r *InferenceServiceReconciler) constructDeployment(
 					Containers:        []corev1.Container{container},
 					Volumes:           storageConfig.volumes,
 					PriorityClassName: r.resolvePriorityClassName(isvc),
+					ImagePullSecrets:  isvc.Spec.ImagePullSecrets,
 				},
 			},
 		},
