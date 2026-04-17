@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -47,6 +48,7 @@ import (
 type InferenceServiceReconciler struct {
 	client.Client
 	Scheme               *runtime.Scheme
+	Recorder             events.EventRecorder
 	ModelCachePath       string
 	ModelCacheSize       string
 	ModelCacheClass      string
@@ -379,6 +381,7 @@ func (r *InferenceServiceReconciler) ensureModelCachePVC(ctx context.Context, na
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=scheduling.k8s.io,resources=priorityclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	reconcileStart := time.Now()
@@ -418,6 +421,11 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	isMetal := model.Spec.Hardware != nil && model.Spec.Hardware.Accelerator == "metal"
+
+	if r.Recorder != nil && needsOffloadMemoryWarning(inferenceService) {
+		r.Recorder.Eventf(inferenceService, nil, corev1.EventTypeWarning, "MissingMemoryRequest", "Reconcile",
+			"CPU/KV offloading is enabled but resources.memory/hostMemory is not set; hybrid pods consume significant host RAM")
+	}
 
 	deployment, readyReplicas, result, err := r.reconcileDeployment(ctx, inferenceService, model, desiredReplicas, modelReady, isMetal)
 	if err != nil || result != nil {
@@ -975,6 +983,34 @@ func appendCacheTypeArgs(args []string, cacheTypeK, cacheTypeV string) []string 
 	return args
 }
 
+func appendMoeCPUOffloadArgs(args []string, moeCPUOffload *bool) []string {
+	if moeCPUOffload != nil && *moeCPUOffload {
+		return append(args, "--cpu-moe")
+	}
+	return args
+}
+
+func appendMoeCPULayersArgs(args []string, moeCPULayers *int32) []string {
+	if moeCPULayers != nil && *moeCPULayers > 0 {
+		return append(args, "--n-cpu-moe", fmt.Sprintf("%d", *moeCPULayers))
+	}
+	return args
+}
+
+func appendNoKvOffloadArgs(args []string, noKvOffload *bool) []string {
+	if noKvOffload != nil && *noKvOffload {
+		return append(args, "--no-kv-offload")
+	}
+	return args
+}
+
+func needsOffloadMemoryWarning(isvc *inferencev1alpha1.InferenceService) bool {
+	needsRAM := (isvc.Spec.MoeCPUOffload != nil && *isvc.Spec.MoeCPUOffload) ||
+		(isvc.Spec.NoKvOffload != nil && *isvc.Spec.NoKvOffload)
+	memorySet := isvc.Spec.Resources != nil && (isvc.Spec.Resources.Memory != "" || isvc.Spec.Resources.HostMemory != "")
+	return needsRAM && !memorySet
+}
+
 func (r *InferenceServiceReconciler) constructDeployment(
 	isvc *inferencev1alpha1.InferenceService,
 	model *inferencev1alpha1.Model,
@@ -1080,7 +1116,9 @@ func (r *InferenceServiceReconciler) constructDeployment(
 		if isvc.Spec.Resources.CPU != "" {
 			container.Resources.Requests[corev1.ResourceCPU] = resource.MustParse(isvc.Spec.Resources.CPU)
 		}
-		if isvc.Spec.Resources.Memory != "" {
+		if isvc.Spec.Resources.HostMemory != "" {
+			container.Resources.Requests[corev1.ResourceMemory] = resource.MustParse(isvc.Spec.Resources.HostMemory)
+		} else if isvc.Spec.Resources.Memory != "" {
 			container.Resources.Requests[corev1.ResourceMemory] = resource.MustParse(isvc.Spec.Resources.Memory)
 		}
 	}
