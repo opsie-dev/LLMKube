@@ -46,14 +46,18 @@ func (b *LlamaCppBackend) BuildArgs(isvc *inferencev1alpha1.InferenceService, mo
 		args = append(args, "--n-gpu-layers", fmt.Sprintf("%d", layers))
 
 		if gpuCount > 1 {
-			args = append(args, "--split-mode", "layer")
-
 			var sharding *inferencev1alpha1.GPUShardingSpec
 			if model.Spec.Hardware != nil && model.Spec.Hardware.GPU != nil {
 				sharding = model.Spec.Hardware.GPU.Sharding
 			}
-			tensorSplit := calculateTensorSplit(gpuCount, sharding)
-			args = append(args, "--tensor-split", tensorSplit)
+			splitMode := resolveSplitMode(sharding)
+			args = append(args, "--split-mode", splitMode)
+
+			// --tensor-split ratios only apply to layer/row modes, not none.
+			if splitMode != splitModeNone {
+				tensorSplit := calculateTensorSplit(gpuCount, sharding)
+				args = append(args, "--tensor-split", tensorSplit)
+			}
 		}
 	}
 
@@ -68,6 +72,9 @@ func (b *LlamaCppBackend) BuildArgs(isvc *inferencev1alpha1.InferenceService, mo
 	args = appendTensorOverrideArgs(args, isvc.Spec.TensorOverrides)
 	args = appendBatchSizeArgs(args, isvc.Spec.BatchSize)
 	args = appendUBatchSizeArgs(args, isvc.Spec.UBatchSize)
+	args = appendNoWarmupArgs(args, isvc.Spec.NoWarmup)
+	args = appendReasoningBudgetArgs(args, isvc.Spec.ReasoningBudget, isvc.Spec.ReasoningBudgetMessage)
+	args = appendMetadataOverrideArgs(args, isvc.Spec.MetadataOverrides)
 	if len(isvc.Spec.ExtraArgs) > 0 {
 		args = append(args, isvc.Spec.ExtraArgs...)
 	}

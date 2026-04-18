@@ -138,6 +138,37 @@ type InferenceServiceSpec struct {
 	// +optional
 	NoKvOffload *bool `json:"noKvOffload,omitempty"`
 
+	// NoWarmup skips the llama.cpp startup warmup inference pass.
+	// Reduces pod ready time at the cost of slightly higher first-request latency.
+	// Useful for scale-to-zero and quick redeployment patterns.
+	// Maps to llama.cpp --no-warmup flag.
+	// +optional
+	NoWarmup *bool `json:"noWarmup,omitempty"`
+
+	// ReasoningBudget caps the number of reasoning tokens the model is allowed to
+	// emit per response. Zero disables visible thinking output entirely; the model
+	// still reasons internally but does not emit thinking tokens. Critical for
+	// production agentic workloads on thinking models (Qwen 3.6, GLM-5) where
+	// runaway reasoning can burn compute.
+	// Maps to llama.cpp --reasoning-budget flag.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	ReasoningBudget *int32 `json:"reasoningBudget,omitempty"`
+
+	// ReasoningBudgetMessage is injected when the reasoning budget is exhausted,
+	// forcing the model to conclude. Ignored unless ReasoningBudget is also set.
+	// Maps to llama.cpp --reasoning-budget-message flag.
+	// +optional
+	ReasoningBudgetMessage string `json:"reasoningBudgetMessage,omitempty"`
+
+	// MetadataOverrides overrides GGUF metadata key-value pairs at model load time.
+	// Each entry is passed as a separate --override-kv flag. Format: key=type:value
+	// (e.g., "qwen35moe.context_length=int:1048576" to extend context window, or
+	// "tokenizer.chat_template.thinking=bool:false" to tweak tokenizer behavior).
+	// Maps to llama.cpp --override-kv flag (one flag per entry).
+	// +optional
+	MetadataOverrides []string `json:"metadataOverrides,omitempty"`
+
 	// TensorOverrides provides fine-grained tensor placement overrides for power users.
 	// Each entry specifies a tensor name and target device (e.g., "exps=CPU", "token_embd=CUDA0").
 	// Maps to llama.cpp --override-tensor flag (one flag per entry).
@@ -160,9 +191,9 @@ type InferenceServiceSpec struct {
 	UBatchSize *int32 `json:"uBatchSize,omitempty"`
 
 	// ExtraArgs provides additional command-line arguments passed directly to the
-	// llama-server process. Use for flags not yet supported as typed CRD fields.
+	// runtime process. Use for flags not yet supported as typed CRD fields.
 	// Arguments are appended after all other configured flags.
-	// Only used when Runtime is "llamacpp".
+	// Supported by the "llamacpp" and "vllm" runtimes. Ignored by others.
 	// Example: ["--seed", "42", "--log-disable"]
 	// +optional
 	ExtraArgs []string `json:"extraArgs,omitempty"`
@@ -385,6 +416,22 @@ type VLLMConfig struct {
 	// +kubebuilder:validation:Enum=auto;float16;bfloat16
 	// +optional
 	Dtype string `json:"dtype,omitempty"`
+
+	// EnablePrefixCaching turns on vLLM's automatic prefix caching for repeated prompts.
+	// Significantly reduces time-to-first-token for conversational and agentic workloads
+	// where requests share a common system prompt.
+	// Maps to vLLM --enable-prefix-caching flag.
+	// +optional
+	EnablePrefixCaching *bool `json:"enablePrefixCaching,omitempty"`
+
+	// AttentionBackend selects the attention implementation used by vLLM.
+	// flashinfer is typically fastest on recent NVIDIA GPUs; flash_attn is a solid
+	// default; torch_sdpa and xformers are portability fallbacks. Requires a vLLM
+	// version that supports the chosen backend.
+	// Maps to vLLM --attention-backend flag.
+	// +kubebuilder:validation:Enum=flashinfer;flash_attn;xformers;torch_sdpa
+	// +optional
+	AttentionBackend string `json:"attentionBackend,omitempty"`
 
 	// HFTokenSecretRef references a Secret containing the HuggingFace token.
 	// +optional

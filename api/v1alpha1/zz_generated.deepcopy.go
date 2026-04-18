@@ -294,6 +294,21 @@ func (in *InferenceServiceSpec) DeepCopyInto(out *InferenceServiceSpec) {
 		*out = new(bool)
 		**out = **in
 	}
+	if in.NoWarmup != nil {
+		in, out := &in.NoWarmup, &out.NoWarmup
+		*out = new(bool)
+		**out = **in
+	}
+	if in.ReasoningBudget != nil {
+		in, out := &in.ReasoningBudget, &out.ReasoningBudget
+		*out = new(int32)
+		**out = **in
+	}
+	if in.MetadataOverrides != nil {
+		in, out := &in.MetadataOverrides, &out.MetadataOverrides
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.TensorOverrides != nil {
 		in, out := &in.TensorOverrides, &out.TensorOverrides
 		*out = make([]string, len(*in))
@@ -670,6 +685,11 @@ func (in *VLLMConfig) DeepCopyInto(out *VLLMConfig) {
 	if in.MaxModelLen != nil {
 		in, out := &in.MaxModelLen, &out.MaxModelLen
 		*out = new(int32)
+		**out = **in
+	}
+	if in.EnablePrefixCaching != nil {
+		in, out := &in.EnablePrefixCaching, &out.EnablePrefixCaching
+		*out = new(bool)
 		**out = **in
 	}
 	if in.HFTokenSecretRef != nil {

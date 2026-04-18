@@ -215,6 +215,47 @@ var _ = Describe("calculateTensorSplit", func() {
 			Expect(result).To(Equal("1,1"))
 		})
 	})
+
+	Context("resolveSplitMode", func() {
+		It("should return layer for nil sharding", func() {
+			Expect(resolveSplitMode(nil)).To(Equal("layer"))
+		})
+
+		It("should return layer for empty strategy", func() {
+			sharding := &inferencev1alpha1.GPUShardingSpec{}
+			Expect(resolveSplitMode(sharding)).To(Equal("layer"))
+		})
+
+		It("should return layer for explicit layer strategy", func() {
+			sharding := &inferencev1alpha1.GPUShardingSpec{Strategy: "layer"}
+			Expect(resolveSplitMode(sharding)).To(Equal("layer"))
+		})
+
+		It("should return row for tensor strategy", func() {
+			sharding := &inferencev1alpha1.GPUShardingSpec{Strategy: "tensor"}
+			Expect(resolveSplitMode(sharding)).To(Equal("row"))
+		})
+
+		It("should return row for row strategy", func() {
+			sharding := &inferencev1alpha1.GPUShardingSpec{Strategy: "row"}
+			Expect(resolveSplitMode(sharding)).To(Equal("row"))
+		})
+
+		It("should return none for none strategy", func() {
+			sharding := &inferencev1alpha1.GPUShardingSpec{Strategy: "none"}
+			Expect(resolveSplitMode(sharding)).To(Equal("none"))
+		})
+
+		It("should fall back to layer for pipeline strategy", func() {
+			sharding := &inferencev1alpha1.GPUShardingSpec{Strategy: "pipeline"}
+			Expect(resolveSplitMode(sharding)).To(Equal("layer"))
+		})
+
+		It("should fall back to layer for unknown strategy", func() {
+			sharding := &inferencev1alpha1.GPUShardingSpec{Strategy: "bogus"}
+			Expect(resolveSplitMode(sharding)).To(Equal("layer"))
+		})
+	})
 })
 
 var _ = Describe("Multi-GPU Deployment Construction", func() {
@@ -2139,6 +2180,276 @@ var _ = Describe("Context Size Configuration", func() {
 
 			container := deployment.Spec.Template.Spec.Containers[0]
 			Expect(container.Resources.Requests[corev1.ResourceMemory]).To(Equal(resource.MustParse("4Gi")))
+		})
+	})
+
+	Context("when noWarmup is configured", func() {
+		var (
+			reconciler *InferenceServiceReconciler
+			model      *inferencev1alpha1.Model
+		)
+
+		BeforeEach(func() {
+			reconciler = &InferenceServiceReconciler{
+				ModelCachePath:     "/tmp/llmkube/models",
+				InitContainerImage: "docker.io/curlimages/curl:8.18.0",
+			}
+
+			model = &inferencev1alpha1.Model{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "warmup-model",
+					Namespace: "default",
+				},
+				Spec: inferencev1alpha1.ModelSpec{
+					Source: "https://example.com/model.gguf",
+					Hardware: &inferencev1alpha1.HardwareSpec{
+						GPU: &inferencev1alpha1.GPUSpec{
+							Count:  1,
+							Layers: 64,
+						},
+					},
+				},
+				Status: inferencev1alpha1.ModelStatus{
+					Phase:    "Ready",
+					CacheKey: "test-cache-key",
+					Path:     "/tmp/llmkube/models/test-model.gguf",
+				},
+			}
+		})
+
+		It("should include --no-warmup when noWarmup is true", func() {
+			replicas := int32(1)
+			noWarmup := true
+			isvc := &inferencev1alpha1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "warmup-service", Namespace: "default"},
+				Spec: inferencev1alpha1.InferenceServiceSpec{
+					ModelRef: "warmup-model",
+					Replicas: &replicas,
+					Image:    "ghcr.io/ggml-org/llama.cpp:server-cuda13",
+					NoWarmup: &noWarmup,
+					Resources: &inferencev1alpha1.InferenceResourceRequirements{
+						GPU: 1,
+					},
+				},
+			}
+			deployment := reconciler.constructDeployment(isvc, model, 1)
+			args := deployment.Spec.Template.Spec.Containers[0].Args
+			Expect(args).To(ContainElement("--no-warmup"))
+		})
+
+		It("should NOT include --no-warmup when noWarmup is not specified", func() {
+			replicas := int32(1)
+			isvc := &inferencev1alpha1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "no-warmup-unset", Namespace: "default"},
+				Spec: inferencev1alpha1.InferenceServiceSpec{
+					ModelRef: "warmup-model",
+					Replicas: &replicas,
+					Image:    "ghcr.io/ggml-org/llama.cpp:server-cuda13",
+					Resources: &inferencev1alpha1.InferenceResourceRequirements{
+						GPU: 1,
+					},
+				},
+			}
+			deployment := reconciler.constructDeployment(isvc, model, 1)
+			args := deployment.Spec.Template.Spec.Containers[0].Args
+			Expect(args).NotTo(ContainElement("--no-warmup"))
+		})
+
+		It("should NOT include --no-warmup when noWarmup is false", func() {
+			replicas := int32(1)
+			noWarmup := false
+			isvc := &inferencev1alpha1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "warmup-false", Namespace: "default"},
+				Spec: inferencev1alpha1.InferenceServiceSpec{
+					ModelRef: "warmup-model",
+					Replicas: &replicas,
+					Image:    "ghcr.io/ggml-org/llama.cpp:server-cuda13",
+					NoWarmup: &noWarmup,
+					Resources: &inferencev1alpha1.InferenceResourceRequirements{
+						GPU: 1,
+					},
+				},
+			}
+			deployment := reconciler.constructDeployment(isvc, model, 1)
+			args := deployment.Spec.Template.Spec.Containers[0].Args
+			Expect(args).NotTo(ContainElement("--no-warmup"))
+		})
+	})
+
+	Context("when reasoningBudget is configured", func() {
+		var (
+			reconciler *InferenceServiceReconciler
+			model      *inferencev1alpha1.Model
+		)
+
+		BeforeEach(func() {
+			reconciler = &InferenceServiceReconciler{
+				ModelCachePath:     "/tmp/llmkube/models",
+				InitContainerImage: "docker.io/curlimages/curl:8.18.0",
+			}
+
+			model = &inferencev1alpha1.Model{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "reason-model",
+					Namespace: "default",
+				},
+				Spec: inferencev1alpha1.ModelSpec{
+					Source: "https://example.com/model.gguf",
+					Hardware: &inferencev1alpha1.HardwareSpec{
+						GPU: &inferencev1alpha1.GPUSpec{
+							Count:  1,
+							Layers: 64,
+						},
+					},
+				},
+				Status: inferencev1alpha1.ModelStatus{
+					Phase:    "Ready",
+					CacheKey: "test-cache-key",
+					Path:     "/tmp/llmkube/models/test-model.gguf",
+				},
+			}
+		})
+
+		buildISVC := func(budget *int32, message string) *inferencev1alpha1.InferenceService {
+			replicas := int32(1)
+			return &inferencev1alpha1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "reason-service", Namespace: "default"},
+				Spec: inferencev1alpha1.InferenceServiceSpec{
+					ModelRef:               "reason-model",
+					Replicas:               &replicas,
+					Image:                  "ghcr.io/ggml-org/llama.cpp:server-cuda13",
+					ReasoningBudget:        budget,
+					ReasoningBudgetMessage: message,
+					Resources: &inferencev1alpha1.InferenceResourceRequirements{
+						GPU: 1,
+					},
+				},
+			}
+		}
+
+		It("should include --reasoning-budget when budget is set (no message)", func() {
+			budget := int32(1024)
+			deployment := reconciler.constructDeployment(buildISVC(&budget, ""), model, 1)
+			args := deployment.Spec.Template.Spec.Containers[0].Args
+			Expect(args).To(ContainElements("--reasoning-budget", "1024"))
+			Expect(args).NotTo(ContainElement("--reasoning-budget-message"))
+		})
+
+		It("should include both flags when budget and message are set", func() {
+			budget := int32(2048)
+			deployment := reconciler.constructDeployment(buildISVC(&budget, "wrap it up"), model, 1)
+			args := deployment.Spec.Template.Spec.Containers[0].Args
+			Expect(args).To(ContainElements("--reasoning-budget", "2048"))
+			Expect(args).To(ContainElements("--reasoning-budget-message", "wrap it up"))
+		})
+
+		It("should emit --reasoning-budget 0 to disable visible thinking", func() {
+			budget := int32(0)
+			deployment := reconciler.constructDeployment(buildISVC(&budget, ""), model, 1)
+			args := deployment.Spec.Template.Spec.Containers[0].Args
+			Expect(args).To(ContainElements("--reasoning-budget", "0"))
+		})
+
+		It("should NOT emit reasoning-budget-message without budget", func() {
+			deployment := reconciler.constructDeployment(buildISVC(nil, "ignored"), model, 1)
+			args := deployment.Spec.Template.Spec.Containers[0].Args
+			Expect(args).NotTo(ContainElement("--reasoning-budget"))
+			Expect(args).NotTo(ContainElement("--reasoning-budget-message"))
+		})
+
+		It("should NOT emit either flag when both are unset", func() {
+			deployment := reconciler.constructDeployment(buildISVC(nil, ""), model, 1)
+			args := deployment.Spec.Template.Spec.Containers[0].Args
+			Expect(args).NotTo(ContainElement("--reasoning-budget"))
+			Expect(args).NotTo(ContainElement("--reasoning-budget-message"))
+		})
+	})
+
+	Context("when metadataOverrides is configured", func() {
+		var (
+			reconciler *InferenceServiceReconciler
+			model      *inferencev1alpha1.Model
+		)
+
+		BeforeEach(func() {
+			reconciler = &InferenceServiceReconciler{
+				ModelCachePath:     "/tmp/llmkube/models",
+				InitContainerImage: "docker.io/curlimages/curl:8.18.0",
+			}
+
+			model = &inferencev1alpha1.Model{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "meta-override-model",
+					Namespace: "default",
+				},
+				Spec: inferencev1alpha1.ModelSpec{
+					Source: "https://example.com/model.gguf",
+					Hardware: &inferencev1alpha1.HardwareSpec{
+						GPU: &inferencev1alpha1.GPUSpec{
+							Count:  1,
+							Layers: 64,
+						},
+					},
+				},
+				Status: inferencev1alpha1.ModelStatus{
+					Phase:    "Ready",
+					CacheKey: "test-cache-key",
+					Path:     "/tmp/llmkube/models/test-model.gguf",
+				},
+			}
+		})
+
+		buildISVC := func(overrides []string) *inferencev1alpha1.InferenceService {
+			replicas := int32(1)
+			return &inferencev1alpha1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "meta-override-svc", Namespace: "default"},
+				Spec: inferencev1alpha1.InferenceServiceSpec{
+					ModelRef:          "meta-override-model",
+					Replicas:          &replicas,
+					Image:             "ghcr.io/ggml-org/llama.cpp:server-cuda13",
+					MetadataOverrides: overrides,
+					Resources: &inferencev1alpha1.InferenceResourceRequirements{
+						GPU: 1,
+					},
+				},
+			}
+		}
+
+		It("should emit one --override-kv flag per entry", func() {
+			overrides := []string{
+				"qwen35moe.context_length=int:1048576",
+				"tokenizer.chat_template.thinking=bool:false",
+			}
+			deployment := reconciler.constructDeployment(buildISVC(overrides), model, 1)
+			args := deployment.Spec.Template.Spec.Containers[0].Args
+			Expect(args).To(ContainElements("--override-kv", "qwen35moe.context_length=int:1048576"))
+			Expect(args).To(ContainElements("--override-kv", "tokenizer.chat_template.thinking=bool:false"))
+			// Count occurrences
+			count := 0
+			for _, a := range args {
+				if a == "--override-kv" {
+					count++
+				}
+			}
+			Expect(count).To(Equal(2))
+		})
+
+		It("should emit single --override-kv for one entry", func() {
+			deployment := reconciler.constructDeployment(buildISVC([]string{"foo=int:42"}), model, 1)
+			args := deployment.Spec.Template.Spec.Containers[0].Args
+			Expect(args).To(ContainElements("--override-kv", "foo=int:42"))
+		})
+
+		It("should NOT emit --override-kv when slice is empty", func() {
+			deployment := reconciler.constructDeployment(buildISVC([]string{}), model, 1)
+			args := deployment.Spec.Template.Spec.Containers[0].Args
+			Expect(args).NotTo(ContainElement("--override-kv"))
+		})
+
+		It("should NOT emit --override-kv when slice is nil", func() {
+			deployment := reconciler.constructDeployment(buildISVC(nil), model, 1)
+			args := deployment.Spec.Template.Spec.Containers[0].Args
+			Expect(args).NotTo(ContainElement("--override-kv"))
 		})
 	})
 
@@ -4677,6 +4988,126 @@ var _ = Describe("RuntimeBackend interface", func() {
 			Expect(liveness.HTTPGet.Path).To(Equal("/health"))
 			Expect(readiness.HTTPGet.Path).To(Equal("/health"))
 		})
+
+		It("should pass extraArgs through to vllm container args", func() {
+			isvc := &inferencev1alpha1.InferenceService{
+				Spec: inferencev1alpha1.InferenceServiceSpec{
+					ExtraArgs: []string{"--enable-prefix-caching", "--gpu-memory-utilization", "0.9"},
+				},
+			}
+			model := &inferencev1alpha1.Model{}
+			args := backend.BuildArgs(isvc, model, "/models/llama3", 8000)
+			Expect(args).To(ContainElement("--enable-prefix-caching"))
+			Expect(args).To(ContainElements("--gpu-memory-utilization", "0.9"))
+		})
+
+		It("should not include any extraArgs when nil", func() {
+			isvc := &inferencev1alpha1.InferenceService{
+				Spec: inferencev1alpha1.InferenceServiceSpec{},
+			}
+			model := &inferencev1alpha1.Model{}
+			args := backend.BuildArgs(isvc, model, "/models/llama3", 8000)
+			Expect(args).To(ContainElements("--model", "/models/llama3"))
+			Expect(args).To(ContainElements("--host", "0.0.0.0"))
+			Expect(args).To(ContainElements("--port", "8000"))
+			// No additional flags beyond defaults
+			Expect(args).To(HaveLen(6))
+		})
+
+		It("should append extraArgs after typed flags", func() {
+			tp := int32(2)
+			isvc := &inferencev1alpha1.InferenceService{
+				Spec: inferencev1alpha1.InferenceServiceSpec{
+					VLLMConfig: &inferencev1alpha1.VLLMConfig{TensorParallelSize: &tp},
+					ExtraArgs:  []string{"--gpu-memory-utilization", "0.9"},
+				},
+			}
+			model := &inferencev1alpha1.Model{}
+			args := backend.BuildArgs(isvc, model, "/models/llama3", 8000)
+			tpIdx := -1
+			extraIdx := -1
+			for i, a := range args {
+				if a == "--tensor-parallel-size" {
+					tpIdx = i
+				}
+				if a == "--gpu-memory-utilization" {
+					extraIdx = i
+				}
+			}
+			Expect(tpIdx).To(BeNumerically(">=", 0))
+			Expect(extraIdx).To(BeNumerically(">", tpIdx))
+		})
+
+		It("should include --enable-prefix-caching when enablePrefixCaching is true", func() {
+			enable := true
+			isvc := &inferencev1alpha1.InferenceService{
+				Spec: inferencev1alpha1.InferenceServiceSpec{
+					VLLMConfig: &inferencev1alpha1.VLLMConfig{EnablePrefixCaching: &enable},
+				},
+			}
+			model := &inferencev1alpha1.Model{}
+			args := backend.BuildArgs(isvc, model, "/models/llama3", 8000)
+			Expect(args).To(ContainElement("--enable-prefix-caching"))
+		})
+
+		It("should NOT include --enable-prefix-caching when nil", func() {
+			isvc := &inferencev1alpha1.InferenceService{
+				Spec: inferencev1alpha1.InferenceServiceSpec{
+					VLLMConfig: &inferencev1alpha1.VLLMConfig{},
+				},
+			}
+			model := &inferencev1alpha1.Model{}
+			args := backend.BuildArgs(isvc, model, "/models/llama3", 8000)
+			Expect(args).NotTo(ContainElement("--enable-prefix-caching"))
+		})
+
+		It("should NOT include --enable-prefix-caching when false", func() {
+			enable := false
+			isvc := &inferencev1alpha1.InferenceService{
+				Spec: inferencev1alpha1.InferenceServiceSpec{
+					VLLMConfig: &inferencev1alpha1.VLLMConfig{EnablePrefixCaching: &enable},
+				},
+			}
+			model := &inferencev1alpha1.Model{}
+			args := backend.BuildArgs(isvc, model, "/models/llama3", 8000)
+			Expect(args).NotTo(ContainElement("--enable-prefix-caching"))
+		})
+
+		It("should include --attention-backend when attentionBackend is set", func() {
+			isvc := &inferencev1alpha1.InferenceService{
+				Spec: inferencev1alpha1.InferenceServiceSpec{
+					VLLMConfig: &inferencev1alpha1.VLLMConfig{AttentionBackend: "flashinfer"},
+				},
+			}
+			model := &inferencev1alpha1.Model{}
+			args := backend.BuildArgs(isvc, model, "/models/llama3", 8000)
+			Expect(args).To(ContainElements("--attention-backend", "flashinfer"))
+		})
+
+		It("should include each supported attentionBackend value", func() {
+			backends := []string{"flashinfer", "flash_attn", "xformers", "torch_sdpa"}
+			for _, b := range backends {
+				isvc := &inferencev1alpha1.InferenceService{
+					Spec: inferencev1alpha1.InferenceServiceSpec{
+						VLLMConfig: &inferencev1alpha1.VLLMConfig{AttentionBackend: b},
+					},
+				}
+				model := &inferencev1alpha1.Model{}
+				args := backend.BuildArgs(isvc, model, "/models/llama3", 8000)
+				Expect(args).To(ContainElements("--attention-backend", b))
+			}
+		})
+
+		It("should NOT include --attention-backend when empty", func() {
+			isvc := &inferencev1alpha1.InferenceService{
+				Spec: inferencev1alpha1.InferenceServiceSpec{
+					VLLMConfig: &inferencev1alpha1.VLLMConfig{},
+				},
+			}
+			model := &inferencev1alpha1.Model{}
+			args := backend.BuildArgs(isvc, model, "/models/llama3", 8000)
+			Expect(args).NotTo(ContainElement("--attention-backend"))
+		})
 	})
 
 	Context("TGIBackend", func() {
@@ -5163,6 +5594,8 @@ var _ = Describe("constructDeployment Regression Tests", func() {
 			noKvOffload := true
 			batchSize := int32(2048)
 			ubatchSize := int32(256)
+			noWarmup := true
+			reasoningBudget := int32(1024)
 
 			model := &inferencev1alpha1.Model{
 				ObjectMeta: metav1.ObjectMeta{Name: "gpu-full", Namespace: "default"},
@@ -5188,20 +5621,24 @@ var _ = Describe("constructDeployment Regression Tests", func() {
 			isvc := &inferencev1alpha1.InferenceService{
 				ObjectMeta: metav1.ObjectMeta{Name: "gpu-full-svc", Namespace: "default"},
 				Spec: inferencev1alpha1.InferenceServiceSpec{
-					ModelRef:        "gpu-full",
-					Image:           "ghcr.io/ggml-org/llama.cpp:server-cuda13",
-					ContextSize:     &contextSize,
-					ParallelSlots:   &parallelSlots,
-					FlashAttention:  &flashAttn,
-					Jinja:           &jinja,
-					CacheTypeK:      "q8_0",
-					CacheTypeV:      "q4_0",
-					MoeCPUOffload:   &moeCPUOffload,
-					NoKvOffload:     &noKvOffload,
-					TensorOverrides: []string{"exps=CPU", "token_embd=CUDA0"},
-					BatchSize:       &batchSize,
-					UBatchSize:      &ubatchSize,
-					ExtraArgs:       []string{"--log-disable"},
+					ModelRef:               "gpu-full",
+					Image:                  "ghcr.io/ggml-org/llama.cpp:server-cuda13",
+					ContextSize:            &contextSize,
+					ParallelSlots:          &parallelSlots,
+					FlashAttention:         &flashAttn,
+					Jinja:                  &jinja,
+					CacheTypeK:             "q8_0",
+					CacheTypeV:             "q4_0",
+					MoeCPUOffload:          &moeCPUOffload,
+					NoKvOffload:            &noKvOffload,
+					TensorOverrides:        []string{"exps=CPU", "token_embd=CUDA0"},
+					BatchSize:              &batchSize,
+					UBatchSize:             &ubatchSize,
+					NoWarmup:               &noWarmup,
+					ReasoningBudget:        &reasoningBudget,
+					ReasoningBudgetMessage: "wrap it up",
+					MetadataOverrides:      []string{"qwen35moe.context_length=int:1048576"},
+					ExtraArgs:              []string{"--log-disable"},
 					Resources: &inferencev1alpha1.InferenceResourceRequirements{
 						GPU:    1,
 						CPU:    "2",
@@ -5251,6 +5688,16 @@ var _ = Describe("constructDeployment Regression Tests", func() {
 			By("verifying micro-batch size")
 			Expect(container.Args).To(ContainElements("--ubatch-size", "256"))
 
+			By("verifying no warmup")
+			Expect(container.Args).To(ContainElement("--no-warmup"))
+
+			By("verifying reasoning budget")
+			Expect(container.Args).To(ContainElements("--reasoning-budget", "1024"))
+			Expect(container.Args).To(ContainElements("--reasoning-budget-message", "wrap it up"))
+
+			By("verifying metadata overrides")
+			Expect(container.Args).To(ContainElements("--override-kv", "qwen35moe.context_length=int:1048576"))
+
 			By("verifying extra args")
 			Expect(container.Args).To(ContainElement("--log-disable"))
 
@@ -5268,6 +5715,76 @@ var _ = Describe("constructDeployment Regression Tests", func() {
 			By("verifying no multi-GPU flags for single GPU")
 			Expect(container.Args).NotTo(ContainElement("--split-mode"))
 			Expect(container.Args).NotTo(ContainElement("--tensor-split"))
+		})
+	})
+
+	Context("GPU model with all vLLM options", func() {
+		It("should produce deployment with every supported vllmConfig field", func() {
+			tp := int32(2)
+			maxLen := int32(8192)
+			enablePrefixCache := true
+
+			backend := &VLLMBackend{}
+			model := &inferencev1alpha1.Model{
+				ObjectMeta: metav1.ObjectMeta{Name: "vllm-full", Namespace: "default"},
+				Spec: inferencev1alpha1.ModelSpec{
+					Source: "meta-llama/Llama-3.1-8B-Instruct",
+					Format: "safetensors",
+				},
+			}
+
+			isvc := &inferencev1alpha1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "vllm-full-svc", Namespace: "default"},
+				Spec: inferencev1alpha1.InferenceServiceSpec{
+					ModelRef: "vllm-full",
+					Runtime:  "vllm",
+					VLLMConfig: &inferencev1alpha1.VLLMConfig{
+						TensorParallelSize:  &tp,
+						MaxModelLen:         &maxLen,
+						Quantization:        "awq",
+						Dtype:               "bfloat16",
+						EnablePrefixCaching: &enablePrefixCache,
+						AttentionBackend:    "flashinfer",
+					},
+					ExtraArgs: []string{"--gpu-memory-utilization", "0.9"},
+				},
+			}
+
+			args := backend.BuildArgs(isvc, model, "/models/vllm-full", 8000)
+
+			By("verifying tensor parallel size")
+			Expect(args).To(ContainElements("--tensor-parallel-size", "2"))
+
+			By("verifying max model len")
+			Expect(args).To(ContainElements("--max-model-len", "8192"))
+
+			By("verifying quantization")
+			Expect(args).To(ContainElements("--quantization", "awq"))
+
+			By("verifying dtype")
+			Expect(args).To(ContainElements("--dtype", "bfloat16"))
+
+			By("verifying prefix caching")
+			Expect(args).To(ContainElement("--enable-prefix-caching"))
+
+			By("verifying attention backend")
+			Expect(args).To(ContainElements("--attention-backend", "flashinfer"))
+
+			By("verifying extraArgs passthrough")
+			Expect(args).To(ContainElements("--gpu-memory-utilization", "0.9"))
+
+			By("verifying extraArgs land after typed flags")
+			tpIdx, extraIdx := -1, -1
+			for i, a := range args {
+				if a == "--tensor-parallel-size" {
+					tpIdx = i
+				}
+				if a == "--gpu-memory-utilization" {
+					extraIdx = i
+				}
+			}
+			Expect(tpIdx).To(BeNumerically(">=", 0))
+			Expect(extraIdx).To(BeNumerically(">", tpIdx))
 		})
 	})
 

@@ -884,6 +884,36 @@ func (r *InferenceServiceReconciler) resolveEffectivePriority(isvc *inferencev1a
 	return priorityValues["normal"]
 }
 
+// llama.cpp --split-mode values.
+const (
+	splitModeLayer = "layer"
+	splitModeRow   = "row"
+	splitModeNone  = "none"
+)
+
+// resolveSplitMode maps the Model CRD's sharding.Strategy enum to the llama.cpp
+// --split-mode value. Unknown or missing values fall back to layer. The
+// "pipeline" strategy is accepted for forward compatibility but falls back to
+// layer since llama.cpp has no pipeline split-mode.
+func resolveSplitMode(sharding *inferencev1alpha1.GPUShardingSpec) string {
+	if sharding == nil {
+		return splitModeLayer
+	}
+	switch sharding.Strategy {
+	case splitModeRow, "tensor":
+		return splitModeRow
+	case splitModeNone:
+		return splitModeNone
+	case "pipeline":
+		// llama.cpp has no pipeline split-mode; fall back to layer.
+		return splitModeLayer
+	case splitModeLayer, "":
+		return splitModeLayer
+	default:
+		return splitModeLayer
+	}
+}
+
 // calculateTensorSplit returns comma-separated ratios for llama.cpp --tensor-split flag.
 // When sharding.LayerSplit is provided, layer ranges are converted to proportional ratios
 // (e.g., ["0-24", "25-39"] becomes "5,3"). Falls back to equal split on any error.
@@ -1016,6 +1046,13 @@ func appendTensorOverrideArgs(args []string, overrides []string) []string {
 	return args
 }
 
+func appendMetadataOverrideArgs(args []string, overrides []string) []string {
+	for _, override := range overrides {
+		args = append(args, "--override-kv", override)
+	}
+	return args
+}
+
 func appendBatchSizeArgs(args []string, batchSize *int32) []string {
 	if batchSize != nil && *batchSize > 0 {
 		return append(args, "--batch-size", fmt.Sprintf("%d", *batchSize))
@@ -1026,6 +1063,24 @@ func appendBatchSizeArgs(args []string, batchSize *int32) []string {
 func appendUBatchSizeArgs(args []string, uBatchSize *int32) []string {
 	if uBatchSize != nil && *uBatchSize > 0 {
 		return append(args, "--ubatch-size", fmt.Sprintf("%d", *uBatchSize))
+	}
+	return args
+}
+
+func appendNoWarmupArgs(args []string, noWarmup *bool) []string {
+	if noWarmup != nil && *noWarmup {
+		return append(args, "--no-warmup")
+	}
+	return args
+}
+
+func appendReasoningBudgetArgs(args []string, budget *int32, message string) []string {
+	if budget == nil {
+		return args
+	}
+	args = append(args, "--reasoning-budget", fmt.Sprintf("%d", *budget))
+	if message != "" {
+		args = append(args, "--reasoning-budget-message", message)
 	}
 	return args
 }

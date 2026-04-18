@@ -42,11 +42,21 @@ func (b *VLLMBackend) BuildArgs(isvc *inferencev1alpha1.InferenceService, model 
 		if cfg.Dtype != "" {
 			args = append(args, "--dtype", cfg.Dtype)
 		}
+		if cfg.EnablePrefixCaching != nil && *cfg.EnablePrefixCaching {
+			args = append(args, "--enable-prefix-caching")
+		}
+		if cfg.AttentionBackend != "" {
+			args = append(args, "--attention-backend", cfg.AttentionBackend)
+		}
 	}
 
 	gpuCount := resolveGPUCount(isvc, model)
 	if gpuCount > 1 && (cfg == nil || cfg.TensorParallelSize == nil) {
 		args = append(args, "--tensor-parallel-size", fmt.Sprintf("%d", gpuCount))
+	}
+
+	if len(isvc.Spec.ExtraArgs) > 0 {
+		args = append(args, isvc.Spec.ExtraArgs...)
 	}
 
 	return args
