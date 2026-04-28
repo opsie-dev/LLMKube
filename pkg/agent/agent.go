@@ -18,6 +18,9 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -30,6 +33,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	inferencev1alpha1 "github.com/defilantech/llmkube/api/v1alpha1"
+)
+
+// Inference runtime identifiers used by MetalAgentConfig.Runtime.
+const (
+	runtimeOMLX   = "omlx"
+	runtimeOllama = "ollama"
 )
 
 // MetalAgentConfig contains configuration for the Metal agent
@@ -120,6 +129,11 @@ type ManagedProcess struct {
 	ModelID   string // oMLX/Ollama model identifier used for unload; empty for llama-server
 	StartedAt time.Time
 	Healthy   bool
+
+	// SpecHash captures the hash of InferenceServiceSpec fields that, if
+	// changed, require respawning the underlying process. Used by ensureProcess
+	// to detect spec drift on UPDATED events and respawn instead of no-oping.
+	SpecHash string
 }
 
 // NewMetalAgent creates a new Metal agent instance
@@ -183,7 +197,7 @@ func (a *MetalAgent) Start(ctx context.Context) error {
 	}
 
 	switch a.config.Runtime {
-	case "omlx":
+	case runtimeOMLX:
 		port := a.config.OMLXPort
 		if port == 0 {
 			port = 8000
@@ -198,7 +212,7 @@ func (a *MetalAgent) Start(ctx context.Context) error {
 			omlxExec.SetStartupTimeout(a.config.OMLXStartupTimeout)
 		}
 		a.executor = omlxExec
-	case "ollama":
+	case runtimeOllama:
 		port := a.config.OllamaPort
 		if port == 0 {
 			port = 11434
@@ -311,21 +325,151 @@ func (a *MetalAgent) handleEvent(ctx context.Context, event InferenceServiceEven
 	return nil
 }
 
-// ensureProcess ensures a llama-server process is running for the InferenceService
+// executorBaseConfig holds the values ensureProcess derives from sources
+// outside isvc.Spec (memory check, defaults, perf-core detection). Passing
+// these alongside the isvc into buildExecutorConfig lets the helper own all
+// the spec → flag mapping in one place.
+type executorBaseConfig struct {
+	GPULayers      int32
+	ContextSize    int
+	FlashAttention bool
+	BatchSize      int
+	UBatchSize     int
+}
+
+// buildExecutorConfig collects every flag-relevant InferenceService field into
+// an ExecutorConfig that buildLlamaServerArgs can consume. Pointer fields are
+// dereferenced here so the executor sees plain values; cache types are resolved
+// (custom > standard) to mirror the controller's runtime_llamacpp arg builder.
+func buildExecutorConfig(
+	isvc *inferencev1alpha1.InferenceService,
+	model *inferencev1alpha1.Model,
+	base executorBaseConfig,
+) ExecutorConfig {
+	cacheTypeK := isvc.Spec.CacheTypeK
+	if isvc.Spec.CacheTypeCustomK != "" {
+		cacheTypeK = isvc.Spec.CacheTypeCustomK
+	}
+	cacheTypeV := isvc.Spec.CacheTypeV
+	if isvc.Spec.CacheTypeCustomV != "" {
+		cacheTypeV = isvc.Spec.CacheTypeCustomV
+	}
+
+	return ExecutorConfig{
+		Name:                   isvc.Name,
+		Namespace:              isvc.Namespace,
+		ModelSource:            model.Spec.Source,
+		ModelName:              model.Name,
+		GPULayers:              base.GPULayers,
+		ContextSize:            base.ContextSize,
+		Jinja:                  derefBool(isvc.Spec.Jinja),
+		FlashAttention:         base.FlashAttention,
+		Mlock:                  true,
+		BatchSize:              base.BatchSize,
+		UBatchSize:             base.UBatchSize,
+		ParallelSlots:          derefInt32(isvc.Spec.ParallelSlots),
+		CacheTypeK:             cacheTypeK,
+		CacheTypeV:             cacheTypeV,
+		MoeCPUOffload:          derefBool(isvc.Spec.MoeCPUOffload),
+		MoeCPULayers:           derefInt32(isvc.Spec.MoeCPULayers),
+		NoKvOffload:            derefBool(isvc.Spec.NoKvOffload),
+		TensorOverrides:        isvc.Spec.TensorOverrides,
+		MetadataOverrides:      isvc.Spec.MetadataOverrides,
+		NoWarmup:               derefBool(isvc.Spec.NoWarmup),
+		ReasoningBudget:        derefInt32(isvc.Spec.ReasoningBudget),
+		ReasoningBudgetMessage: isvc.Spec.ReasoningBudgetMessage,
+		ExtraArgs:              isvc.Spec.ExtraArgs,
+	}
+}
+
+func derefBool(p *bool) bool {
+	if p == nil {
+		return false
+	}
+	return *p
+}
+
+func derefInt32(p *int32) int {
+	if p == nil {
+		return 0
+	}
+	return int(*p)
+}
+
+// validateRuntimeFormat returns an error if the model's format is incompatible
+// with the agent's configured runtime. Empty format defaults to "gguf".
+func (a *MetalAgent) validateRuntimeFormat(model *inferencev1alpha1.Model) error {
+	modelFormat := model.Spec.Format
+	if modelFormat == "" {
+		modelFormat = "gguf"
+	}
+
+	var bad bool
+	var runtimeLabel string
+	switch a.config.Runtime {
+	case runtimeOMLX:
+		bad = modelFormat == "gguf"
+		runtimeLabel = runtimeOMLX
+	case runtimeOllama:
+		bad = modelFormat == "mlx"
+		runtimeLabel = runtimeOllama
+	default:
+		bad = modelFormat == "mlx"
+		runtimeLabel = "llama-server"
+	}
+	if !bad {
+		return nil
+	}
+
+	a.logger.Warnw("skipping incompatible model format for runtime",
+		"model", model.Name, "format", modelFormat, "runtime", a.config.Runtime)
+	return fmt.Errorf(
+		"model %s has format %q which is incompatible with %s runtime",
+		model.Name, modelFormat, runtimeLabel,
+	)
+}
+
+// ensureProcess ensures a llama-server process is running for the InferenceService.
+// On UPDATED events, the spec is diffed against the running process's stored
+// hash; if it changed, the existing process is stopped before a fresh one is
+// spawned so the new flags actually take effect. Replicas=0 stops the process
+// without restarting.
 func (a *MetalAgent) ensureProcess(ctx context.Context, isvc *inferencev1alpha1.InferenceService) error {
 	key := types.NamespacedName{
 		Namespace: isvc.Namespace,
 		Name:      isvc.Name,
 	}.String()
 
+	desiredHash := computeSpecHash(isvc)
+
 	// Check if process already exists
 	a.mu.RLock()
 	existing, exists := a.processes[key]
 	a.mu.RUnlock()
 
-	if exists && existing.Healthy {
-		a.logger.Debugw("inference service already has a healthy process", "key", key)
+	// Honor spec.replicas=0 by stopping a running process and not respawning.
+	// Without this, a user trying to take a model offline via spec edits has
+	// to fully reload the metal-agent to evict it.
+	if isvc.Spec.Replicas != nil && *isvc.Spec.Replicas == 0 {
+		if exists {
+			a.logger.Infow("replicas=0; stopping process",
+				"namespace", isvc.Namespace, "name", isvc.Name)
+			return a.deleteProcess(ctx, key)
+		}
 		return nil
+	}
+
+	if exists && existing.Healthy {
+		if existing.SpecHash == desiredHash {
+			a.logger.Debugw("inference service already has a healthy process with matching spec", "key", key)
+			return nil
+		}
+		a.logger.Infow("spec changed; restarting process to pick up new flags",
+			"namespace", isvc.Namespace, "name", isvc.Name,
+			"oldSpecHash", existing.SpecHash, "newSpecHash", desiredHash)
+		if err := a.deleteProcess(ctx, key); err != nil {
+			return fmt.Errorf("failed to stop process before respawn: %w", err)
+		}
 	}
 
 	a.logger.Infow("starting inference service", "namespace", isvc.Namespace, "name", isvc.Name)
@@ -339,32 +483,8 @@ func (a *MetalAgent) ensureProcess(ctx context.Context, isvc *inferencev1alpha1.
 		return fmt.Errorf("failed to get model %s: %w", isvc.Spec.ModelRef, err)
 	}
 
-	// Check for runtime/format mismatch
-	modelFormat := model.Spec.Format
-	if modelFormat == "" {
-		modelFormat = "gguf" // default
-	}
-	switch a.config.Runtime {
-	case "omlx":
-		if modelFormat == "gguf" {
-			a.logger.Warnw("skipping GGUF model on oMLX runtime",
-				"model", model.Name, "format", modelFormat, "runtime", a.config.Runtime)
-			return fmt.Errorf("model %s has format %q which is incompatible with omlx runtime", model.Name, modelFormat)
-		}
-	case "ollama":
-		if modelFormat == "mlx" {
-			a.logger.Warnw("skipping MLX model on Ollama runtime",
-				"model", model.Name, "format", modelFormat, "runtime", a.config.Runtime)
-			return fmt.Errorf(
-				"model %s has format %q which is incompatible with ollama runtime",
-				model.Name, modelFormat)
-		}
-	default:
-		if modelFormat == "mlx" {
-			a.logger.Warnw("skipping MLX model on llama-server runtime",
-				"model", model.Name, "format", modelFormat, "runtime", a.config.Runtime)
-			return fmt.Errorf("model %s has format %q which is incompatible with llama-server runtime", model.Name, modelFormat)
-		}
+	if err := a.validateRuntimeFormat(model); err != nil {
+		return err
 	}
 
 	// Get GPU layers if specified
@@ -459,23 +579,23 @@ func (a *MetalAgent) ensureProcess(ctx context.Context, isvc *inferencev1alpha1.
 		uBatchSize = int(*isvc.Spec.UBatchSize)
 	}
 
-	// Start the process
-	process, err := a.executor.StartProcess(ctx, ExecutorConfig{
-		Name:           isvc.Name,
-		Namespace:      isvc.Namespace,
-		ModelSource:    model.Spec.Source,
-		ModelName:      model.Name,
+	cfg := buildExecutorConfig(isvc, model, executorBaseConfig{
 		GPULayers:      gpuLayers,
 		ContextSize:    contextSize,
-		Jinja:          isvc.Spec.Jinja != nil && *isvc.Spec.Jinja,
 		FlashAttention: flashAttn,
-		Mlock:          true,
 		BatchSize:      batchSize,
 		UBatchSize:     uBatchSize,
 	})
+
+	// Start the process
+	process, err := a.executor.StartProcess(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to start process: %w", err)
 	}
+
+	// Stamp the spec hash onto the process so future ensureProcess calls
+	// can detect drift via simple string compare.
+	process.SpecHash = desiredHash
 
 	// Store process and update metrics
 	a.mu.Lock()
@@ -795,4 +915,74 @@ func (a *MetalAgent) estimateModelMemory(model *inferencev1alpha1.Model, context
 	}
 
 	return EstimateModelMemory(fileSizeBytes, layerCount, embeddingSize, contextSize), nil
+}
+
+// computeSpecHash returns a stable hash of the InferenceServiceSpec fields that,
+// if changed, require respawning the underlying llama-server process. Listing
+// fields explicitly (rather than hashing the full Spec) keeps the hash stable
+// across CRD additions that don't affect process invocation — adding a new
+// status-only or controller-only field won't trigger a spurious respawn.
+func computeSpecHash(isvc *inferencev1alpha1.InferenceService) string {
+	if isvc == nil {
+		return ""
+	}
+	// Fields included MUST match what the executor actually consumes (or what
+	// it will consume once #349 closes the ExecutorConfig gap). When adding a
+	// new spec field that affects llama-server args, add it here too.
+	relevant := struct {
+		ModelRef               string
+		ContextSize            *int32
+		BatchSize              *int32
+		UBatchSize             *int32
+		ParallelSlots          *int32
+		FlashAttention         *bool
+		Jinja                  *bool
+		NoKvOffload            *bool
+		NoWarmup               *bool
+		MoeCPUOffload          *bool
+		MoeCPULayers           *int32
+		CacheTypeK             string
+		CacheTypeV             string
+		CacheTypeCustomK       string
+		CacheTypeCustomV       string
+		TensorOverrides        []string
+		MetadataOverrides      []string
+		ExtraArgs              []string
+		ReasoningBudget        *int32
+		ReasoningBudgetMessage string
+		Replicas               *int32
+		Runtime                string
+	}{
+		ModelRef:               isvc.Spec.ModelRef,
+		ContextSize:            isvc.Spec.ContextSize,
+		BatchSize:              isvc.Spec.BatchSize,
+		UBatchSize:             isvc.Spec.UBatchSize,
+		ParallelSlots:          isvc.Spec.ParallelSlots,
+		FlashAttention:         isvc.Spec.FlashAttention,
+		Jinja:                  isvc.Spec.Jinja,
+		NoKvOffload:            isvc.Spec.NoKvOffload,
+		NoWarmup:               isvc.Spec.NoWarmup,
+		MoeCPUOffload:          isvc.Spec.MoeCPUOffload,
+		MoeCPULayers:           isvc.Spec.MoeCPULayers,
+		CacheTypeK:             isvc.Spec.CacheTypeK,
+		CacheTypeV:             isvc.Spec.CacheTypeV,
+		CacheTypeCustomK:       isvc.Spec.CacheTypeCustomK,
+		CacheTypeCustomV:       isvc.Spec.CacheTypeCustomV,
+		TensorOverrides:        isvc.Spec.TensorOverrides,
+		MetadataOverrides:      isvc.Spec.MetadataOverrides,
+		ExtraArgs:              isvc.Spec.ExtraArgs,
+		ReasoningBudget:        isvc.Spec.ReasoningBudget,
+		ReasoningBudgetMessage: isvc.Spec.ReasoningBudgetMessage,
+		Replicas:               isvc.Spec.Replicas,
+		Runtime:                isvc.Spec.Runtime,
+	}
+	b, err := json.Marshal(relevant)
+	if err != nil {
+		// json.Marshal on this struct shape is effectively infallible; if it
+		// somehow fails we fall back to the zero hash, which forces a respawn
+		// — safer than skipping the diff entirely.
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }

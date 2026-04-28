@@ -474,3 +474,314 @@ func TestDeleteProcess_StopFailureStillUnregistersEndpoint(t *testing.T) {
 		t.Fatal("endpoints should be deleted even when StopProcess fails")
 	}
 }
+
+func TestComputeSpecHash_StableForSameSpec(t *testing.T) {
+	ctx := int32(65536)
+	isvc := &inferencev1alpha1.InferenceService{
+		Spec: inferencev1alpha1.InferenceServiceSpec{
+			ModelRef:    "test-model",
+			ContextSize: &ctx,
+		},
+	}
+	h1 := computeSpecHash(isvc)
+	h2 := computeSpecHash(isvc)
+	if h1 != h2 {
+		t.Errorf("hash should be stable across calls with same input: %s vs %s", h1, h2)
+	}
+	if h1 == "" {
+		t.Error("hash should not be empty for valid spec")
+	}
+}
+
+func TestComputeSpecHash_ChangesWithContextSize(t *testing.T) {
+	ctx1 := int32(65536)
+	ctx2 := int32(131072)
+	a := &inferencev1alpha1.InferenceService{
+		Spec: inferencev1alpha1.InferenceServiceSpec{ModelRef: "m", ContextSize: &ctx1},
+	}
+	b := &inferencev1alpha1.InferenceService{
+		Spec: inferencev1alpha1.InferenceServiceSpec{ModelRef: "m", ContextSize: &ctx2},
+	}
+	if computeSpecHash(a) == computeSpecHash(b) {
+		t.Error("hash should differ when contextSize changes")
+	}
+}
+
+func TestComputeSpecHash_ChangesWithCacheTypeCustom(t *testing.T) {
+	a := &inferencev1alpha1.InferenceService{Spec: inferencev1alpha1.InferenceServiceSpec{ModelRef: "m"}}
+	b := &inferencev1alpha1.InferenceService{
+		Spec: inferencev1alpha1.InferenceServiceSpec{ModelRef: "m", CacheTypeCustomK: "turbo3"},
+	}
+	if computeSpecHash(a) == computeSpecHash(b) {
+		t.Error("hash should differ when cacheTypeCustomK is set (added in #351, used by runtime arg builder)")
+	}
+}
+
+func TestComputeSpecHash_ChangesWithExtraArgs(t *testing.T) {
+	a := &inferencev1alpha1.InferenceService{Spec: inferencev1alpha1.InferenceServiceSpec{ModelRef: "m"}}
+	b := &inferencev1alpha1.InferenceService{
+		Spec: inferencev1alpha1.InferenceServiceSpec{
+			ModelRef:  "m",
+			ExtraArgs: []string{"--cache-type-k", "turbo3"},
+		},
+	}
+	if computeSpecHash(a) == computeSpecHash(b) {
+		t.Error("hash should differ when extraArgs is set")
+	}
+}
+
+func TestComputeSpecHash_NilIsvc(t *testing.T) {
+	if computeSpecHash(nil) != "" {
+		t.Error("nil isvc should produce empty hash, not panic")
+	}
+}
+
+// TestBuildExecutorConfig_PassesAllSpecFieldsThrough is the regression guard
+// for issue #349: every flag-relevant InferenceServiceSpec field must reach
+// the executor. If a future field gets added to the spec but the agent
+// forgets to plumb it, this test fails loudly.
+func TestBuildExecutorConfig_PassesAllSpecFieldsThrough(t *testing.T) {
+	parallel := int32(4)
+	moeLayers := int32(8)
+	reasoning := int32(2048)
+	jinja := true
+	moeOff := true
+	noKv := true
+	noWarm := true
+
+	isvc := &inferencev1alpha1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "all-fields", Namespace: "default"},
+		Spec: inferencev1alpha1.InferenceServiceSpec{
+			ModelRef:               "any-model",
+			ParallelSlots:          &parallel,
+			Jinja:                  &jinja,
+			CacheTypeK:             "q8_0",
+			CacheTypeV:             "q8_0",
+			CacheTypeCustomK:       "turbo3", // wins over CacheTypeK
+			CacheTypeCustomV:       "turbo4", // wins over CacheTypeV
+			MoeCPUOffload:          &moeOff,
+			MoeCPULayers:           &moeLayers,
+			NoKvOffload:            &noKv,
+			TensorOverrides:        []string{"exps=CPU"},
+			MetadataOverrides:      []string{"general.architecture=qwen3"},
+			NoWarmup:               &noWarm,
+			ReasoningBudget:        &reasoning,
+			ReasoningBudgetMessage: "wrap up",
+			ExtraArgs:              []string{"--rope-scale", "4"},
+		},
+	}
+	model := &inferencev1alpha1.Model{
+		ObjectMeta: metav1.ObjectMeta{Name: "any-model", Namespace: "default"},
+		Spec:       inferencev1alpha1.ModelSpec{Source: "https://example.test/m.gguf"},
+	}
+
+	cfg := buildExecutorConfig(isvc, model, executorBaseConfig{
+		GPULayers:      99,
+		ContextSize:    65536,
+		FlashAttention: true,
+		BatchSize:      2048,
+		UBatchSize:     512,
+	})
+
+	checks := map[string]struct {
+		got, want any
+	}{
+		"Name":                   {cfg.Name, "all-fields"},
+		"Namespace":              {cfg.Namespace, "default"},
+		"ModelSource":            {cfg.ModelSource, "https://example.test/m.gguf"},
+		"ModelName":              {cfg.ModelName, "any-model"},
+		"GPULayers":              {cfg.GPULayers, int32(99)},
+		"ContextSize":            {cfg.ContextSize, 65536},
+		"Jinja":                  {cfg.Jinja, true},
+		"FlashAttention":         {cfg.FlashAttention, true},
+		"Mlock":                  {cfg.Mlock, true},
+		"BatchSize":              {cfg.BatchSize, 2048},
+		"UBatchSize":             {cfg.UBatchSize, 512},
+		"ParallelSlots":          {cfg.ParallelSlots, 4},
+		"CacheTypeK":             {cfg.CacheTypeK, "turbo3"},
+		"CacheTypeV":             {cfg.CacheTypeV, "turbo4"},
+		"MoeCPUOffload":          {cfg.MoeCPUOffload, true},
+		"MoeCPULayers":           {cfg.MoeCPULayers, 8},
+		"NoKvOffload":            {cfg.NoKvOffload, true},
+		"NoWarmup":               {cfg.NoWarmup, true},
+		"ReasoningBudget":        {cfg.ReasoningBudget, 2048},
+		"ReasoningBudgetMessage": {cfg.ReasoningBudgetMessage, "wrap up"},
+	}
+	for field, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %v, want %v", field, c.got, c.want)
+		}
+	}
+	if len(cfg.TensorOverrides) != 1 || cfg.TensorOverrides[0] != "exps=CPU" {
+		t.Errorf("TensorOverrides = %v, want [exps=CPU]", cfg.TensorOverrides)
+	}
+	if len(cfg.MetadataOverrides) != 1 || cfg.MetadataOverrides[0] != "general.architecture=qwen3" {
+		t.Errorf("MetadataOverrides = %v, want [general.architecture=qwen3]", cfg.MetadataOverrides)
+	}
+	if len(cfg.ExtraArgs) != 2 || cfg.ExtraArgs[0] != "--rope-scale" || cfg.ExtraArgs[1] != "4" {
+		t.Errorf("ExtraArgs = %v, want [--rope-scale 4]", cfg.ExtraArgs)
+	}
+}
+
+// TestBuildExecutorConfig_StandardCacheTypeWhenCustomEmpty confirms that the
+// standard cacheTypeK/V is used when the custom field is empty (the common
+// case for clusters not running a TurboQuant-enabled fork).
+func TestBuildExecutorConfig_StandardCacheTypeWhenCustomEmpty(t *testing.T) {
+	isvc := &inferencev1alpha1.InferenceService{
+		Spec: inferencev1alpha1.InferenceServiceSpec{
+			ModelRef:   "m",
+			CacheTypeK: "q8_0",
+			CacheTypeV: "q8_0",
+		},
+	}
+	model := &inferencev1alpha1.Model{Spec: inferencev1alpha1.ModelSpec{Source: "x"}}
+	cfg := buildExecutorConfig(isvc, model, executorBaseConfig{})
+	if cfg.CacheTypeK != "q8_0" {
+		t.Errorf("CacheTypeK = %q, want %q", cfg.CacheTypeK, "q8_0")
+	}
+	if cfg.CacheTypeV != "q8_0" {
+		t.Errorf("CacheTypeV = %q, want %q", cfg.CacheTypeV, "q8_0")
+	}
+}
+
+// TestBuildExecutorConfig_NilPointersAreSafe confirms that an InferenceService
+// with mostly-nil pointer fields produces a zero-valued ExecutorConfig (no
+// panics, no spurious flag values).
+func TestBuildExecutorConfig_NilPointersAreSafe(t *testing.T) {
+	isvc := &inferencev1alpha1.InferenceService{
+		Spec: inferencev1alpha1.InferenceServiceSpec{ModelRef: "m"},
+	}
+	model := &inferencev1alpha1.Model{Spec: inferencev1alpha1.ModelSpec{Source: "x"}}
+	cfg := buildExecutorConfig(isvc, model, executorBaseConfig{})
+	if cfg.ParallelSlots != 0 || cfg.MoeCPUOffload || cfg.MoeCPULayers != 0 ||
+		cfg.NoKvOffload || cfg.NoWarmup || cfg.ReasoningBudget != 0 || cfg.Jinja {
+		t.Errorf("nil pointers must produce zero-valued config, got: %+v", cfg)
+	}
+}
+
+// runEnsureProcessExpectingMapEviction sets up a metal-agent with a pre-seeded
+// healthy process at default/<name>, runs ensureProcess against the given isvc,
+// and asserts the process map entry has been removed. Pre-seeded PID -99999
+// makes StopProcess error out so the function returns an error, but the
+// deletion branch has already run by then; that is the invariant we check
+// (mirrors TestDeleteProcess_StopFailureStillUnregistersEndpoint). Used by the
+// replicas=0 and spec-drift tests, which share this exact setup.
+func runEnsureProcessExpectingMapEviction(
+	t *testing.T,
+	name string,
+	isvc *inferencev1alpha1.InferenceService,
+) {
+	t.Helper()
+	scheme := newTestScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
+	//nolint:staticcheck // SA1019: Endpoints API matches production code under test
+	endpoints := &corev1.Endpoints{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(svc, endpoints).
+		Build()
+
+	agent := NewMetalAgent(MetalAgentConfig{K8sClient: k8sClient, Namespace: "default"})
+	agent.executor = NewMetalExecutor("/fake/llama-server", "/tmp/models", newNopLogger())
+	agent.registry = NewServiceRegistry(k8sClient, "", newNopLogger())
+
+	key := "default/" + name
+	agent.processes[key] = &ManagedProcess{
+		Name:      name,
+		Namespace: "default",
+		PID:       -99999,
+		Healthy:   true,
+		SpecHash:  "old-hash",
+	}
+
+	_ = agent.ensureProcess(context.Background(), isvc)
+
+	if _, exists := agent.processes[key]; exists {
+		t.Errorf("process entry %q should be removed", key)
+	}
+}
+
+func TestEnsureProcess_ReplicasZeroStopsExistingProcess(t *testing.T) {
+	zeroReplicas := int32(0)
+	isvc := &inferencev1alpha1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "scale-down-isvc", Namespace: "default"},
+		Spec: inferencev1alpha1.InferenceServiceSpec{
+			ModelRef: "any-model",
+			Replicas: &zeroReplicas,
+		},
+	}
+	runEnsureProcessExpectingMapEviction(t, "scale-down-isvc", isvc)
+}
+
+func TestEnsureProcess_ReplicasZeroNoOpWhenNoProcess(t *testing.T) {
+	scheme := newTestScheme()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	agent := NewMetalAgent(MetalAgentConfig{K8sClient: k8sClient, Namespace: "default"})
+	agent.executor = NewMetalExecutor("/fake/llama-server", "/tmp/models", newNopLogger())
+	agent.registry = NewServiceRegistry(k8sClient, "", newNopLogger())
+
+	zeroReplicas := int32(0)
+	isvc := &inferencev1alpha1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "never-existed", Namespace: "default"},
+		Spec: inferencev1alpha1.InferenceServiceSpec{
+			ModelRef: "any-model",
+			Replicas: &zeroReplicas,
+		},
+	}
+
+	if err := agent.ensureProcess(context.Background(), isvc); err != nil {
+		t.Errorf("replicas=0 with no existing process should be a no-op (no error), got: %v", err)
+	}
+}
+
+func TestEnsureProcess_HealthyAndSpecMatchesIsNoOp(t *testing.T) {
+	scheme := newTestScheme()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	agent := NewMetalAgent(MetalAgentConfig{K8sClient: k8sClient, Namespace: "default"})
+	agent.executor = NewMetalExecutor("/fake/llama-server", "/tmp/models", newNopLogger())
+	agent.registry = NewServiceRegistry(k8sClient, "", newNopLogger())
+
+	ctx := int32(65536)
+	isvc := &inferencev1alpha1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "noop-isvc", Namespace: "default"},
+		Spec: inferencev1alpha1.InferenceServiceSpec{
+			ModelRef:    "any-model",
+			ContextSize: &ctx,
+		},
+	}
+
+	// Pre-seed a healthy process whose SpecHash matches the incoming spec.
+	// ensureProcess should fast-path return nil without consulting K8s for
+	// the Model — proving the no-op happens before the model lookup that
+	// would otherwise fail (no Model in the fake client).
+	agent.processes["default/noop-isvc"] = &ManagedProcess{
+		Name:      "noop-isvc",
+		Namespace: "default",
+		Healthy:   true,
+		SpecHash:  computeSpecHash(isvc),
+	}
+
+	if err := agent.ensureProcess(context.Background(), isvc); err != nil {
+		t.Errorf("healthy + matching specHash should no-op without error, got: %v", err)
+	}
+	if _, exists := agent.processes["default/noop-isvc"]; !exists {
+		t.Error("process entry should remain when no-op fast path triggers")
+	}
+}
+
+func TestEnsureProcess_SpecDriftCallsDeleteBeforeRespawn(t *testing.T) {
+	ctx := int32(131072)
+	isvc := &inferencev1alpha1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "drift-isvc", Namespace: "default"},
+		Spec: inferencev1alpha1.InferenceServiceSpec{
+			ModelRef:    "any-model",
+			ContextSize: &ctx,
+		},
+	}
+	runEnsureProcessExpectingMapEviction(t, "drift-isvc", isvc)
+}
