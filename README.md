@@ -34,6 +34,7 @@
 
   <p>
     <a href="#quick-start">Quick Start</a> &bull;
+    <a href="#architecture">Architecture</a> &bull;
     <a href="#the-metal-agent">Metal Agent</a> &bull;
     <a href="#how-is-this-different">Why LLMKube?</a> &bull;
     <a href="#performance">Benchmarks</a> &bull;
@@ -54,6 +55,36 @@ So you set up llama.cpp. It works great on one machine. Then you need to scale i
 Suddenly you're building an entire platform instead of shipping your product.
 
 **LLMKube is a Kubernetes operator that turns LLM deployment into a two-line YAML problem.** Define a `Model` and an `InferenceService`, and the operator handles downloading, caching, GPU scheduling, health checks, scaling, and exposing an OpenAI-compatible API.
+
+---
+
+## Architecture
+
+Two cooperating processes. An in-cluster controller owns Kubernetes-side desired state. An out-of-cluster `metal-agent` (optional, only needed for Apple Silicon hosts) owns OS-level process supervision and registers Endpoints back into the cluster.
+
+```mermaid
+%%{init: {'theme':'neutral','flowchart':{'curve':'linear'}}}%%
+flowchart TB
+    subgraph CLUSTER["Kubernetes cluster"]
+        direction LR
+        CTRL["LLMKube controller"]
+        CRD["Model · InferenceService<br/>(custom resources)"]
+        POD["Runtime pods<br/>llama.cpp · vLLM · TGI"]
+        CRD -- watched by --> CTRL
+        CTRL -- schedules --> POD
+    end
+
+    subgraph HOST["Apple Silicon host (optional)"]
+        direction LR
+        AGENT["metal-agent"]
+        NATIVE["llama-server · oMLX · Ollama<br/>(native processes)"]
+        AGENT -- supervises --> NATIVE
+    end
+
+    AGENT -- "registers Endpoints" --> CLUSTER
+```
+
+Same operator manages Linux/GPU pods and Apple Silicon hosts; both surface as `InferenceService` objects to `kubectl`. Full breakdown with reconciliation flow and the CRD reference: **[docs.llmkube.com/concepts/architecture](https://llmkube.com/docs/concepts/architecture)**.
 
 ---
 
@@ -372,6 +403,14 @@ We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full gu
 - K3s edge deployment
 - SafeTensors format support
 - Multi-node GPU sharding for 70B+ models
+
+### Contributors
+
+Thanks to the people who've shipped code, tests, and docs:
+
+<a href="https://github.com/defilantech/LLMKube/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=defilantech/LLMKube&excludeBot=true" alt="LLMKube contributors" />
+</a>
 
 ---
 
