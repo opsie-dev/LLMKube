@@ -36,6 +36,13 @@ func appendAttentionBackend(args []string, attentionBackend string) []string {
 	return args
 }
 
+func appendCPUOffloadGb(args []string, cpuOffloadGb *int32) []string {
+	if cpuOffloadGb != nil {
+		return append(args, "--cpu-offload-gb", fmt.Sprintf("%d", *cpuOffloadGb))
+	}
+	return args
+}
+
 func appendDtype(args []string, dtype string) []string {
 	if dtype != "" {
 		return append(args, "--dtype", dtype)
