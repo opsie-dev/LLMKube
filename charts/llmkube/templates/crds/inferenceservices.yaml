@@ -1715,6 +1715,15 @@ spec:
                     - xformers
                     - torch_sdpa
                     type: string
+                  cpuOffloadGB:
+                    description: |-
+                      CPUOffloadGb increases the GPU memory size. When set, passes
+                      --cpu-offload-gb to vLLM. Per-rank, so 4 on TP=2 means 4 GB of
+                      CPU RAM per GPU. Use when FP8 model weights don't fit VRAM.
+                      Throughput hit is 2-5x on the offloaded path.
+                    format: int32
+                    minimum: 0
+                    type: integer
                   dtype:
                     description: Dtype sets the model data type (auto, float16, bfloat16).
                     enum:
