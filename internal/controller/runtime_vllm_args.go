@@ -75,6 +75,13 @@ func appendEnablePrefixCaching(args []string, enablePrefixCaching *bool) []strin
 	return args
 }
 
+func appendGPUMemoryUtilization(args []string, gpuMemoryUtilization *float64) []string {
+	if gpuMemoryUtilization != nil {
+		return append(args, "--gpu-memory-utilization", fmt.Sprintf("%.2f", *gpuMemoryUtilization))
+	}
+	return args
+}
+
 // resolveKVCacheDtype returns the custom vLLM KV cache type when set,
 // otherwise the enum-validated standard value (dereferenced; nil → ""). Lets
 // users opt into vLLM image-specific cache formats (TurboQuant turbo2 from
