@@ -559,6 +559,14 @@ type VLLMConfig struct {
 	// HFTokenSecretRef references a Secret containing the HuggingFace token.
 	// +optional
 	HFTokenSecretRef *corev1.SecretKeySelector `json:"hfTokenSecretRef,omitempty"`
+
+	// GPUMemoryUtilization controls how much GPU memory each stage can use.
+	// When set, passes --gpu-memory-utilization to vLLM. Range from 0.1 - 0.99
+	// and default unset (vLLM uses 0.90).
+	// +kubebuilder:validation:Minimum=0.1
+	// +kubebuilder:validation:Maximum=0.99
+	// +optional
+	GPUMemoryUtilization *float64 `json:"gpuMemoryUtilization,omitempty"`
 }
 
 // SpeculativeConfig configures draft-model speculative decoding for vLLM.
