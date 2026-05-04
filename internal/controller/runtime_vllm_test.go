@@ -129,25 +129,25 @@ func TestVLLMBuildArgs(t *testing.T) {
 			},
 		},
 		{
-			name: "cpuOffloadGb set emits flag if gpu is enabled",
+			name: "cpuOffloadGB set emits flag if gpu is enabled",
 			spec: &inferencev1alpha1.InferenceServiceSpec{
 				Runtime:    "vllm",
 				ModelRef:   "test-model-gpu",
-				VLLMConfig: &inferencev1alpha1.VLLMConfig{CPUOffloadGb: ptrInt32(4)},
+				VLLMConfig: &inferencev1alpha1.VLLMConfig{CPUOffloadGB: ptrInt32(4)},
 			},
 			contains: []flagCheck{{"--cpu-offload-gb", "4"}},
 		},
 		{
-			name: "cpuOffloadGb set does not emit flag if gpu is not enabled",
+			name: "cpuOffloadGB set does not emit flag if gpu is not enabled",
 			spec: &inferencev1alpha1.InferenceServiceSpec{
 				Runtime:    "vllm",
 				ModelRef:   "test-model",
-				VLLMConfig: &inferencev1alpha1.VLLMConfig{CPUOffloadGb: ptrInt32(4)},
+				VLLMConfig: &inferencev1alpha1.VLLMConfig{CPUOffloadGB: ptrInt32(4)},
 			},
 			notContains: []string{"--cpu-offload-gb"},
 		},
 		{
-			name: "cpuOffloadGb nil does not emit flag",
+			name: "cpuOffloadGB nil does not emit flag",
 			spec: &inferencev1alpha1.InferenceServiceSpec{
 				Runtime:    "vllm",
 				ModelRef:   "test-model",

@@ -771,8 +771,8 @@ func (in *VLLMConfig) DeepCopyInto(out *VLLMConfig) {
 		*out = new(v1.SecretKeySelector)
 		(*in).DeepCopyInto(*out)
 	}
-	if in.CPUOffloadGb != nil {
-		in, out := &in.CPUOffloadGb, &out.CPUOffloadGb
+	if in.CPUOffloadGB != nil {
+		in, out := &in.CPUOffloadGB, &out.CPUOffloadGB
 		*out = new(int32)
 		**out = **in
 	}

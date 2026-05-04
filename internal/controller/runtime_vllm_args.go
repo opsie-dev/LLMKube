@@ -36,9 +36,9 @@ func appendAttentionBackend(args []string, attentionBackend string) []string {
 	return args
 }
 
-func appendCPUOffloadGb(args []string, cpuOffloadGb *int32) []string {
-	if cpuOffloadGb != nil {
-		return append(args, "--cpu-offload-gb", fmt.Sprintf("%d", *cpuOffloadGb))
+func appendCPUOffloadGB(args []string, cpuOffloadGB *int32) []string {
+	if cpuOffloadGB != nil {
+		return append(args, "--cpu-offload-gb", fmt.Sprintf("%d", *cpuOffloadGB))
 	}
 	return args
 }
