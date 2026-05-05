@@ -94,9 +94,21 @@ func (b *VLLMBackend) BuildArgs(isvc *inferencev1alpha1.InferenceService, model 
 		}
 		args = appendEnableExpertParallel(args, cfg.EnableExpertParallel)
 
-		if gpuCount > 0 {
-			args = appendCPUOffloadGB(args, cfg.CPUOffloadGB)
-			args = appendGPUMemoryUtilization(args, cfg.GPUMemoryUtilization)
+		args, err = appendCPUOffloadGB(args, cfg.CPUOffloadGB, gpuCount)
+		if err != nil {
+			vllmLog.Info(
+				err.Error(),
+				"inferenceService", isvc.Name,
+				"namespace", isvc.Namespace,
+			)
+		}
+		args, err = appendGPUMemoryUtilization(args, cfg.GPUMemoryUtilization, gpuCount)
+		if err != nil {
+			vllmLog.Info(
+				err.Error(),
+				"inferenceService", isvc.Name,
+				"namespace", isvc.Namespace,
+			)
 		}
 	}
 

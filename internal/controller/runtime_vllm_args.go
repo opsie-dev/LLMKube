@@ -36,11 +36,18 @@ func appendAttentionBackend(args []string, attentionBackend string) []string {
 	return args
 }
 
-func appendCPUOffloadGB(args []string, cpuOffloadGB *int32) []string {
+func appendCPUOffloadGB(args []string, cpuOffloadGB *int32, gpuCount int32) ([]string, error) {
 	if cpuOffloadGB != nil {
-		return append(args, "--cpu-offload-gb", fmt.Sprintf("%d", *cpuOffloadGB))
+		// NOTE(fvoituret): --cpu-offload-gb CLI args is only GPU related so we prevent
+		// adding it in a non GPU context.
+		if gpuCount == 0 {
+			return args, errors.New(
+				"spec.vllmConfig.cpuOffloadGB is defined with no GPU hardware; skipping --cpu-offload-gb flags",
+			)
+		}
+		return append(args, "--cpu-offload-gb", fmt.Sprintf("%d", *cpuOffloadGB)), nil
 	}
-	return args
+	return args, nil
 }
 
 func appendDtype(args []string, dtype string) []string {
@@ -75,11 +82,18 @@ func appendEnablePrefixCaching(args []string, enablePrefixCaching *bool) []strin
 	return args
 }
 
-func appendGPUMemoryUtilization(args []string, gpuMemoryUtilization *float64) []string {
+func appendGPUMemoryUtilization(args []string, gpuMemoryUtilization *float64, gpuCount int32) ([]string, error) {
 	if gpuMemoryUtilization != nil {
-		return append(args, "--gpu-memory-utilization", fmt.Sprintf("%.2f", *gpuMemoryUtilization))
+		// NOTE(fvoituret): --gpu-memory-utilization CLI args is only GPU related so we prevent
+		// adding it in a non GPU context.
+		if gpuCount == 0 {
+			return args, errors.New(
+				"spec.vllmConfig.gpuMemoryUtilization is defined with no GPU hardware; skipping --gpu-memory-utilization flags",
+			)
+		}
+		return append(args, "--gpu-memory-utilization", fmt.Sprintf("%.2f", *gpuMemoryUtilization)), nil
 	}
-	return args
+	return args, nil
 }
 
 // resolveKVCacheDtype returns the custom vLLM KV cache type when set,
