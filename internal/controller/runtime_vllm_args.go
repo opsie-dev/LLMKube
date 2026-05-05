@@ -19,6 +19,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"strconv"
 
 	inferencev1alpha1 "github.com/defilantech/llmkube/api/v1alpha1"
 )
@@ -91,7 +92,7 @@ func appendGPUMemoryUtilization(args []string, gpuMemoryUtilization *float64, gp
 				"spec.vllmConfig.gpuMemoryUtilization is defined with no GPU hardware; skipping --gpu-memory-utilization flags",
 			)
 		}
-		return append(args, "--gpu-memory-utilization", fmt.Sprintf("%.2f", *gpuMemoryUtilization)), nil
+		return append(args, "--gpu-memory-utilization", strconv.FormatFloat(*gpuMemoryUtilization, 'f', -1, 64)), nil
 	}
 	return args, nil
 }

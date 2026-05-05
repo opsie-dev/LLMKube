@@ -162,7 +162,7 @@ func TestVLLMBuildArgs(t *testing.T) {
 				ModelRef:   "test-model-gpu",
 				VLLMConfig: &inferencev1alpha1.VLLMConfig{GPUMemoryUtilization: ptrFloat64(0.80)},
 			},
-			contains: []flagCheck{{"--gpu-memory-utilization", "0.80"}},
+			contains: []flagCheck{{"--gpu-memory-utilization", "0.8"}},
 		},
 		{
 			name: "gpuMemoryUtilization does not emit flag if gpu is not enabled",
