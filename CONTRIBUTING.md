@@ -247,6 +247,17 @@ git diff --exit-code  # Should be no changes
 - Add GPU-specific tests for GPU features
 - Verify metrics are properly exported
 
+### Adding entry to model catalog
+
+Model catalog definition is located at canonical location `catalog/catalog.yaml`. You can edit it
+to add or update a model defintion and ensure it passes QA before to submit it:
+
+```bash
+make fmt
+make vet
+make test
+```
+
 ## Pull Request Process
 
 ### Before Submitting
